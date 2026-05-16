@@ -1,0 +1,42 @@
+{
+  "description": "Windows variant for the Agent Subconscious local hook spike. Use this content in a config-layer hooks.json when Codex runs on Windows.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${PLUGIN_ROOT}\\bin\\subconscious_hook.py\" with-daemon",
+            "timeout": 5,
+            "statusMessage": "Starting Agent Subconscious"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${PLUGIN_ROOT}\\bin\\subconscious_hook.py\" with-daemon",
+            "timeout": 5,
+            "statusMessage": "Checking Agent Subconscious"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${PLUGIN_ROOT}\\bin\\subconscious_hook.py\" with-daemon",
+            "timeout": 5,
+            "statusMessage": "Recording Agent Subconscious observation"
+          }
+        ]
+      }
+    ]
+  }
+}

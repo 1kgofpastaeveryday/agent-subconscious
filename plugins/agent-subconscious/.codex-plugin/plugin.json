@@ -1,0 +1,30 @@
+{
+  "name": "agent-subconscious",
+  "version": "0.1.0",
+  "description": "Local Codex hook spike for next-prompt Subconscious feedback.",
+  "author": {
+    "name": "Agent Subconscious local experiment"
+  },
+  "license": "UNLICENSED",
+  "keywords": [
+    "codex",
+    "hooks",
+    "local-review"
+  ],
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "displayName": "Agent Subconscious",
+    "shortDescription": "Runs the local Subconscious hook spike.",
+    "longDescription": "Installs local Codex lifecycle hooks that call the Agent Subconscious hook adapter. This is a fixture-backed spike, not the production daemon or reviewer.",
+    "developerName": "Agent Subconscious local experiment",
+    "category": "Productivity",
+    "capabilities": [
+      "Local",
+      "Read"
+    ],
+    "defaultPrompt": [
+      "Use Agent Subconscious to run the local hook spike."
+    ],
+    "brandColor": "#10A37F"
+  }
+}

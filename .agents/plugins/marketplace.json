@@ -1,0 +1,20 @@
+{
+  "name": "agent-subconscious-local",
+  "interface": {
+    "displayName": "Agent Subconscious Local"
+  },
+  "plugins": [
+    {
+      "name": "agent-subconscious",
+      "source": {
+        "source": "local",
+        "path": "./plugins/agent-subconscious"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

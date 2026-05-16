@@ -1,0 +1,42 @@
+{
+  "description": "Agent Subconscious local hook spike. Run Codex from the repository root so Python can import agent_subconscious.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/bin/subconscious_hook.py\" with-daemon",
+            "timeout": 5,
+            "statusMessage": "Starting Agent Subconscious"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/bin/subconscious_hook.py\" with-daemon",
+            "timeout": 5,
+            "statusMessage": "Checking Agent Subconscious"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/bin/subconscious_hook.py\" with-daemon",
+            "timeout": 5,
+            "statusMessage": "Recording Agent Subconscious observation"
+          }
+        ]
+      }
+    ]
+  }
+}
