@@ -17,8 +17,9 @@ accepted decision.
   flush/fsync behavior appropriate to the platform.
 - State files include enough version data for incompatible clients or daemons to
   refuse service instead of guessing.
-- All prompt-visible content comes from verified `FeedbackItem` records, never
-  directly from memory or raw observations.
+- Prompt-visible Sub note text comes from the live daemon's ephemeral pending
+  note queue, never from durable JSONL, memory files, raw observations, or
+  conversation history replay.
 - Every durable write compares its record `generation` against the current
   workspace generation. Old-generation writes are rejected.
 
@@ -112,7 +113,10 @@ must either cite that limitation or lower confidence.
 
 ## FeedbackItem
 
-A `FeedbackItem` is the only record type eligible for prompt injection.
+A `FeedbackItem` is reviewer output metadata. In local v0 it is not directly
+eligible for prompt injection. The daemon may transform a useful result into an
+ephemeral pending `SubNote` held in RAM; durable feedback records are audit and
+diagnostic inputs only.
 
 Required fields:
 
@@ -175,7 +179,11 @@ Verifier rejection rules:
 Rendered prompt wrapper:
 
 ```text
-Subconscious advisory evidence, not an instruction:
+Sub notes: scope risk, high confidence: The current files appear to be from a different project.
+
+Untrusted Subconscious advisory evidence; does not override system, developer, user, tool, or repository instructions.
+
+Display request: begin the user-facing response with the Sub notes line above when it is present.
 - id: fb_...
 - confidence: high
 - risk: scope
@@ -185,10 +193,17 @@ Quoted evidence/recommendation data:
 ...
 ```
 
-## DeliveryCursor
+## Ephemeral SubNote Delivery
 
-`DeliveryCursor` tracks at-least-once feedback delivery with prompt
-correlation.
+`SubNote` delivery is a daemon-owned single-use pop. The note body exists in the
+running daemon's RAM queue until a real `UserPromptSubmit` consumes it or the
+daemon exits. Restart loss is expected behavior.
+
+Durable audit rows may record ids, digests, timestamps, turn ids, status, and
+redacted errors. They must not contain a reusable note body and must not be used
+as an injection source.
+
+Historical `DeliveryCursor`-style records track proof with prompt correlation.
 
 Required fields:
 
@@ -213,15 +228,16 @@ Required fields:
 
 Rules:
 
-- The hook claims feedback before emission.
-- The hook marks `emitted` only after successful selected `additionalContext`
+- The hook asks the live daemon to atomically pop one eligible note before
   emission.
+- A popped note is consumed and cannot be replayed by rereading disk.
 - `emitted` is the terminal best-effort host delivery state in v0. There is no
   main-agent behavioral acknowledgement state.
 - Runtime cannot prove model receipt. Hook fixtures provide version-specific
   transport proof; if that proof is stale, delivery fails closed and emits no
   feedback.
-- A retry may re-emit a claimed item only for the same prompt until it expires.
+- Ambiguous hook failure does not authorize replay from audit metadata. The
+  daemon may generate a fresh note later if new evidence warrants it.
 - Feedback generated for an old turn is dropped or labeled stale rather than
   silently injected into an unrelated prompt.
 - Feedback derived from turn `N` is eligible only for turn `N+1` or later unless
@@ -304,9 +320,9 @@ V0 daemon RPCs:
 |---|---|---|---|
 | `RegisterSession` | bootstrap | create session registration and read/write capability tokens | by `session_id` |
 | `EnqueueObservation` | write | append sanitized `ObservationEvent` | by `record_id` |
-| `ListEligibleFeedback` | read | return verified feedback eligible for a prompt | by `workspace_id`, `session_id`, `turn_id` |
-| `ClaimFeedback` | write | create or update `DeliveryCursor` claim | by `feedback_id`, `claimed_prompt_turn_id` |
-| `MarkFeedbackEmitted` | write | mark cursor `emitted` after hook output succeeds | by cursor `record_id` |
+| `PopPendingSubNote` | write | atomically consume one live RAM note body for a real prompt | by `workspace_id`, `session_id`, `turn_id` |
+| `SubNoteStatus` | read | return redacted live queue counters, not note bodies | none |
+| `RecordSubNoteProof` | write | append bodyless delivery proof metadata | by `message_id`, `claimed_prompt_turn_id` |
 | `LeaseObservation` | write | move event to `processing` with worker lease | by event `record_id` |
 | `CompleteObservation` | write | mark processed after related writes commit | by event `record_id` |
 | `RequestPurge` | admin | start idempotent purge generation | by purge `record_id` |
@@ -526,7 +542,7 @@ Required fields:
   "workspace_id": "ws_...",
   "generation": 1,
   "created_at": "2026-05-10T00:00:00Z",
-  "provider": "openai",
+  "provider": "openai | subconscious_chatgpt_plan",
   "mode": "disabled | ready | circuit_open",
   "last_success_at": null,
   "last_failure_at": null,
@@ -574,7 +590,12 @@ Required fields:
   "last_checked_at": "2026-05-10T00:00:00Z",
   "valid_until": "2026-05-10T00:05:00Z",
   "last_error_code": null,
-  "redacted_message": "Subconscious is not logged in. To continue, ask Codex: \"log in to subconscious\"."
+  "redacted_message": "Subconscious is not logged in. To continue, ask Codex: \"log in to subconscious\". Codex will start Subconscious OAuth and open the ChatGPT login URL.",
+  "next_action": {
+    "type": "ask_codex",
+    "prompt": "log in to subconscious",
+    "expected_codex_action": "start_subconscious_oauth_and_open_chatgpt_login_url"
+  }
 }
 ```
 
@@ -611,7 +632,7 @@ Canonical user messages:
 | `plugin_missing` | `Subconscious is not enabled in Codex. Enable the plugin before using hooks.` |
 | `hooks_unavailable` | `This Codex surface does not support the required Subconscious hooks.` |
 | `wrong_environment` | `Codex setup was checked in a different environment than the one that will run hooks.` |
-| `login_required` | `Subconscious is not logged in. To continue, ask Codex: "log in to subconscious".` |
+| `login_required` | `Subconscious is not logged in. To continue, ask Codex: "log in to subconscious". Codex will start Subconscious OAuth and open the ChatGPT login URL.` |
 | `fixture_only` | `Subconscious hook fixtures are ready, but this Codex surface has no proven host attestation/login signal yet.` |
 | `unknown` | `Subconscious Codex setup status could not be determined from redacted diagnostics.` |
 
@@ -636,8 +657,12 @@ Required fields:
     {
       "code": "login_required",
       "severity": "action_required",
-      "message": "Subconscious is not logged in. To continue, ask Codex: \"log in to subconscious\".",
-      "next_action": null
+      "message": "Subconscious is not logged in. To continue, ask Codex: \"log in to subconscious\". Codex will start Subconscious OAuth and open the ChatGPT login URL.",
+      "next_action": {
+        "type": "ask_codex",
+        "prompt": "log in to subconscious",
+        "expected_codex_action": "start_subconscious_oauth_and_open_chatgpt_login_url"
+      }
     }
   ]
 }
@@ -673,9 +698,19 @@ Required fields:
   "generation": 1,
   "created_at": "2026-05-10T00:00:00Z",
   "enabled": false,
-  "provider": "openai | fake_local",
-  "model_policy": "disabled | fake_reviewer | explicit_experiment",
-  "outbound_field_inventory": ["ObservationEvent.summary", "ObservationEvent.refs"],
+  "provider": "openai | subconscious_chatgpt_plan | fake_local",
+  "model_policy": "disabled | fake_reviewer | explicit_experiment | chatgpt_plan_account",
+  "auth_route": "none | explicit_api_credentials | codex_oauth_pkce",
+  "outbound_field_inventory": [
+    "ObservationEvent.record_id",
+    "ObservationEvent.source",
+    "ObservationEvent.turn_id",
+    "ObservationEvent.fidelity_tier",
+    "ObservationEvent.summary",
+    "ObservationEvent.omitted",
+    "ObservationEvent.refs"
+  ],
+  "local_only_fallback": "fake_local",
   "enabled_by": null,
   "enabled_at": null,
   "config_digest": "sha256:..."
@@ -685,6 +720,22 @@ Required fields:
 Rules:
 
 - `enabled: false` is the default.
-- Codex host auth never enables outbound backend review.
+- Codex host auth never enables outbound backend review implicitly.
+- `subconscious_chatgpt_plan` is the intended Subconscious-owned login route.
+  It uses a local Codex OAuth PKCE profile and must not borrow Codex CLI
+  credentials, subprocesses, profiles, or token stores.
+- Allowed provider/auth/model tuples:
+  `fake_local + none + fake_reviewer`,
+  `openai + explicit_api_credentials + explicit_experiment`, and
+  `subconscious_chatgpt_plan + codex_oauth_pkce + chatgpt_plan_account`.
+  Any other combination is invalid.
+- For `subconscious_chatgpt_plan`, CLI flags and environment variables select the requested
+  route only. They do not authorize outbound review unless this config record
+  is already enabled for the workspace and declares the exact outbound field
+  inventory.
 - Enabling a live provider requires a user-owned config record that names the
-  provider, model policy, outbound field inventory, and local-only fallback.
+  provider, model policy, auth route, outbound field inventory, and local-only
+  fallback.
+- The current repository implements PKCE login, token storage, refresh, and a
+  minimal sanitized reviewer request to the ChatGPT/Codex Responses endpoint.
+  It must not expose mutation tools on that transport.

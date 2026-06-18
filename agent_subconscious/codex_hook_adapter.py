@@ -45,8 +45,6 @@ def require_text(payload: dict[str, Any], field: str) -> str:
 
 
 def validate_real_codex_payload(payload: dict[str, Any]) -> str:
-    if os.environ.get(ASSUME_MAIN_AGENT_ENV) != "1":
-        raise hook_probe.HookProbeError("main agent assumption disabled")
     name = hook_probe.event_name(payload)
     if name not in SUPPORTED_EVENTS:
         raise hook_probe.HookProbeError("unsupported event")
@@ -54,9 +52,11 @@ def validate_real_codex_payload(payload: dict[str, Any]) -> str:
     if not hook_probe.safe_token(session_id):
         raise hook_probe.HookProbeError("invalid session")
     require_text(payload, "cwd")
-    for optional_text in ("model", "permission_mode", "transcript_path"):
+    for optional_text in ("model", "permission_mode", "transcript_path", "thread_id", "threadId", "conversation_id", "conversationId"):
         value = payload.get(optional_text)
         if value is not None and not isinstance(value, str):
+            raise hook_probe.HookProbeError(f"invalid {optional_text}")
+        if isinstance(value, str) and value and optional_text in {"thread_id", "threadId", "conversation_id", "conversationId"} and not hook_probe.safe_token(value):
             raise hook_probe.HookProbeError(f"invalid {optional_text}")
     if name == "SessionStart":
         source = payload.get("source") or "startup"

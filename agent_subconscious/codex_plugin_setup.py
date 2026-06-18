@@ -20,6 +20,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+try:
+    from . import hook_probe
+    from . import llm_engine
+except ImportError:  # pragma: no cover - direct script execution fallback.
+    from agent_subconscious import hook_probe
+    from agent_subconscious import llm_engine
+
 PLUGIN_NAME = "agent-subconscious"
 MARKETPLACE_NAME = "agent-subconscious-local"
 PLUGIN_KEY = f"{PLUGIN_NAME}@{MARKETPLACE_NAME}"
@@ -34,9 +41,15 @@ USER_MESSAGES = {
     "plugin_missing": "Subconscious is not enabled in Codex. Enable the plugin before using hooks.",
     "hooks_unavailable": "This Codex surface does not support the required Subconscious hooks.",
     "wrong_environment": "Codex setup was checked in a different environment than the one that will run hooks.",
-    "login_required": 'Subconscious is not logged in. To continue, ask Codex: "log in to subconscious".',
+    "login_required": 'Subconscious is not logged in. To continue, ask Codex: "log in to subconscious". Codex will start Subconscious OAuth and open the ChatGPT login URL.',
     "fixture_only": "Subconscious hook fixtures are ready, but this Codex surface has no proven host attestation/login signal yet.",
     "unknown": "Subconscious Codex setup status could not be determined from redacted diagnostics.",
+}
+
+LOGIN_REQUIRED_NEXT_ACTION = {
+    "type": "ask_codex",
+    "prompt": "log in to subconscious",
+    "expected_codex_action": "start_subconscious_oauth_and_open_chatgpt_login_url",
 }
 
 EVENT_KEY_LABELS = {
@@ -70,18 +83,33 @@ def load_json(path: Path) -> dict[str, Any]:
     return value
 
 
-def hook_command_for_platform(platform: str, python_executable: Path | None = None) -> str:
+def hook_command_for_platform(
+    platform: str,
+    python_executable: Path | None = None,
+    *,
+    fixture_mode: bool = False,
+    plugin_root: Path | None = None,
+) -> str:
     executable = str((python_executable or Path(sys.executable)).expanduser().resolve())
+    root = str((plugin_root or default_plugin_root()).expanduser().resolve())
+    fixture_args = " --debug-assume-main-agent --debug-allow-fixture-key" if fixture_mode else ""
     if platform == "windows":
-        return f'"{executable}" "${{PLUGIN_ROOT}}\\bin\\subconscious_hook.py" with-daemon'
+        return f'{executable} "{root}\\bin\\subconscious_hook.py" with-daemon{fixture_args}'
     if platform == "posix":
-        return f'"{executable}" "${{PLUGIN_ROOT}}/bin/subconscious_hook.py" with-daemon'
+        return f'"{executable}" "{root}/bin/subconscious_hook.py" with-daemon{fixture_args}'
     raise ValueError("platform must be 'posix' or 'windows'")
 
 
-def render_hooks_for_platform(hooks: dict[str, Any], *, platform: str, python_executable: Path | None = None) -> dict[str, Any]:
+def render_hooks_for_platform(
+    hooks: dict[str, Any],
+    *,
+    platform: str,
+    python_executable: Path | None = None,
+    fixture_mode: bool = False,
+    plugin_root: Path | None = None,
+) -> dict[str, Any]:
     rendered = json.loads(json.dumps(hooks))
-    command = hook_command_for_platform(platform, python_executable)
+    command = hook_command_for_platform(platform, python_executable, fixture_mode=fixture_mode, plugin_root=plugin_root)
     groups_by_event = rendered.get("hooks")
     if not isinstance(groups_by_event, dict):
         raise ValueError("missing hooks object")
@@ -179,9 +207,9 @@ def plugin_version(plugin_root: Path) -> str:
     return DEFAULT_PLUGIN_VERSION
 
 
-def hook_trust_entries(plugin_root: Path, *, platform: str = "posix") -> list[HookTrustEntry]:
+def hook_trust_entries(plugin_root: Path, *, platform: str = "posix", fixture_mode: bool = False) -> list[HookTrustEntry]:
     hooks_file = hook_file_for_platform(plugin_root, platform)
-    hooks_doc = render_hooks_for_platform(load_json(hooks_file), platform=platform)
+    hooks_doc = render_hooks_for_platform(load_json(hooks_file), platform=platform, fixture_mode=fixture_mode, plugin_root=plugin_root)
     hooks = hooks_doc.get("hooks")
     if not isinstance(hooks, dict):
         raise ValueError(f"missing hooks object in {hooks_file}")
@@ -219,7 +247,7 @@ def ensure_relative_to(path: Path, base: Path) -> None:
         raise ValueError(f"{resolved} is outside {resolved_base}") from exc
 
 
-def copy_plugin_to_cache(plugin_root: Path, codex_home: Path, *, platform: str = "posix") -> Path:
+def copy_plugin_to_cache(plugin_root: Path, codex_home: Path, *, platform: str = "posix", fixture_mode: bool = False) -> Path:
     version = plugin_version(plugin_root)
     target = plugin_cache_root(codex_home, version)
     cache_base = codex_home / "plugins" / "cache" / MARKETPLACE_NAME / PLUGIN_NAME
@@ -236,7 +264,12 @@ def copy_plugin_to_cache(plugin_root: Path, codex_home: Path, *, platform: str =
         shutil.copytree(repo_package, temp_target / "agent_subconscious", ignore=shutil.ignore_patterns("__pycache__"))
     if platform == "windows":
         shutil.copy2(temp_target / "hooks" / WINDOWS_HOOKS_FILE, temp_target / "hooks" / POSIX_HOOKS_FILE)
-    rendered_hooks = render_hooks_for_platform(load_json(temp_target / "hooks" / POSIX_HOOKS_FILE), platform=platform)
+    rendered_hooks = render_hooks_for_platform(
+        load_json(temp_target / "hooks" / POSIX_HOOKS_FILE),
+        platform=platform,
+        fixture_mode=fixture_mode,
+        plugin_root=plugin_root,
+    )
     (temp_target / "hooks" / POSIX_HOOKS_FILE).write_text(json.dumps(rendered_hooks, indent=2) + "\n", encoding="utf-8", newline="\n")
     if target.exists():
         target.rename(backup_target)
@@ -304,14 +337,36 @@ def codex_version(codex_path: Path | None) -> str | None:
     return version[0][:120] if version else None
 
 
-def cache_matches_source(plugin_root: Path, installed_path: Path, *, platform: str = "posix") -> bool:
+def auth_is_ready(state_dir: Path | None = None) -> bool:
+    try:
+        resolved_state_dir = hook_probe.resolve_state_dir(state_dir or hook_probe.default_state_dir())
+        return (
+            llm_engine.chatgpt_plan_backend_enabled(resolved_state_dir)
+            and llm_engine.has_fresh_chatgpt_plan_access_token(resolved_state_dir)
+        )
+    except (OSError, ValueError, hook_probe.HookProbeError):
+        return False
+
+
+def cache_matches_source(
+    plugin_root: Path,
+    installed_path: Path,
+    *,
+    platform: str = "posix",
+    fixture_mode: bool = False,
+) -> bool:
     if not installed_path.exists():
         return False
     pairs = [
         (plugin_root / ".codex-plugin" / "plugin.json", installed_path / ".codex-plugin" / "plugin.json"),
         (plugin_root / "bin" / "subconscious_hook.py", installed_path / "bin" / "subconscious_hook.py"),
     ]
-    expected_hooks = render_hooks_for_platform(load_json(hook_file_for_platform(plugin_root, platform)), platform=platform)
+    expected_hooks = render_hooks_for_platform(
+        load_json(hook_file_for_platform(plugin_root, platform)),
+        platform=platform,
+        fixture_mode=fixture_mode,
+        plugin_root=plugin_root,
+    )
     installed_hooks_path = installed_path / "hooks" / POSIX_HOOKS_FILE
     if not installed_hooks_path.exists() or load_json(installed_hooks_path) != expected_hooks:
         return False
@@ -412,11 +467,11 @@ def atomic_write_text(path: Path, text: str) -> None:
     os.replace(temp_path, path)
 
 
-def install(plugin_root: Path, codex_home: Path, *, platform: str = "posix") -> dict[str, Any]:
+def install(plugin_root: Path, codex_home: Path, *, platform: str = "posix", fixture_mode: bool = False) -> dict[str, Any]:
     plugin_root = plugin_root.resolve()
     codex_home = codex_home.expanduser().resolve()
-    entries = hook_trust_entries(plugin_root, platform=platform)
-    installed_path = copy_plugin_to_cache(plugin_root, codex_home, platform=platform)
+    entries = hook_trust_entries(plugin_root, platform=platform, fixture_mode=fixture_mode)
+    installed_path = copy_plugin_to_cache(plugin_root, codex_home, platform=platform, fixture_mode=fixture_mode)
     write_config_settings(codex_home, entries)
     return {
         "status": "installed",
@@ -424,6 +479,7 @@ def install(plugin_root: Path, codex_home: Path, *, platform: str = "posix") -> 
         "installed_path": str(installed_path),
         "trusted_hook_count": len(entries),
         "platform": platform,
+        "fixture_mode": fixture_mode,
     }
 
 
@@ -440,11 +496,11 @@ def config_contains_required_state(text: str, entries: list[HookTrustEntry]) -> 
     return True
 
 
-def doctor(plugin_root: Path, codex_home: Path, *, platform: str = "posix") -> dict[str, Any]:
+def doctor(plugin_root: Path, codex_home: Path, *, platform: str = "posix", fixture_mode: bool = False) -> dict[str, Any]:
     plugin_root = plugin_root.resolve()
     codex_home = codex_home.expanduser().resolve()
     version = plugin_version(plugin_root)
-    entries = hook_trust_entries(plugin_root, platform=platform)
+    entries = hook_trust_entries(plugin_root, platform=platform, fixture_mode=fixture_mode)
     installed_path = plugin_cache_root(codex_home, version)
     config_text = read_config(codex_home / "config.toml")
     created_at = utc_now()
@@ -452,11 +508,11 @@ def doctor(plugin_root: Path, codex_home: Path, *, platform: str = "posix") -> d
     codex_ver = codex_version(codex_path)
     installed = (installed_path / ".codex-plugin" / "plugin.json").exists()
     configured = config_contains_required_state(config_text, entries)
-    cache_matches = cache_matches_source(plugin_root, installed_path, platform=platform)
-    fixture_signing_ready = bool(os.environ.get("SUBCONSCIOUS_HOOK_FIXTURE_SIGNING_KEY") or os.environ.get("SUBCONSCIOUS_HOOK_PROBE_ALLOW_FIXTURE_KEY") == "1")
-    fixture_main_agent_assumption = os.environ.get("SUBCONSCIOUS_CODEX_ADAPTER_ASSUME_MAIN_AGENT") == "1"
+    cache_matches = cache_matches_source(plugin_root, installed_path, platform=platform, fixture_mode=fixture_mode)
+    fixture_signing_ready = fixture_mode or bool(os.environ.get("SUBCONSCIOUS_HOOK_FIXTURE_SIGNING_KEY") or os.environ.get("SUBCONSCIOUS_HOOK_PROBE_ALLOW_FIXTURE_KEY") == "1")
+    fixture_main_agent_assumption = fixture_mode or os.environ.get("SUBCONSCIOUS_CODEX_ADAPTER_ASSUME_MAIN_AGENT") == "1"
     fixture_ready = fixture_signing_ready and fixture_main_agent_assumption
-    auth_ready = False
+    auth_ready = auth_is_ready()
     hooks_available = configured
     host_setup_ready = codex_path is not None and installed and configured and cache_matches
     host_surface_ready = host_setup_ready and auth_ready
@@ -481,12 +537,10 @@ def doctor(plugin_root: Path, codex_home: Path, *, platform: str = "posix") -> d
     findings = []
     if mode == "codex_missing":
         findings.append({"code": "codex_missing", "severity": "unsupported", "message": USER_MESSAGES["codex_missing"], "next_action": None})
-    elif not installed:
+    elif not installed or not cache_matches:
         findings.append({"code": "plugin_missing", "severity": "action_required", "message": USER_MESSAGES["plugin_missing"], "next_action": None})
     elif not configured:
         findings.append({"code": "hooks_unavailable", "severity": "unsupported", "message": USER_MESSAGES["hooks_unavailable"], "next_action": None})
-    elif not cache_matches:
-        findings.append({"code": "plugin_missing", "severity": "action_required", "message": USER_MESSAGES["plugin_missing"], "next_action": None})
     elif fixture_ready:
         findings.append({"code": "fixture_only", "severity": "degraded", "message": USER_MESSAGES["fixture_only"], "next_action": None})
     elif not auth_ready:
@@ -495,10 +549,11 @@ def doctor(plugin_root: Path, codex_home: Path, *, platform: str = "posix") -> d
                 "code": "login_required",
                 "severity": "action_required",
                 "message": USER_MESSAGES["login_required"],
-                "next_action": None,
+                "next_action": LOGIN_REQUIRED_NEXT_ACTION,
             }
         )
     exit_code = exit_code_for_status(status)
+    status_message = None if status == "ok" else (USER_MESSAGES["fixture_only"] if fixture_ready else USER_MESSAGES.get(mode, USER_MESSAGES["unknown"]))
     report = {
         "schema_version": 1,
         "record_id": stable_id("doctor", str(codex_home), str(plugin_root), created_at),
@@ -527,12 +582,14 @@ def doctor(plugin_root: Path, codex_home: Path, *, platform: str = "posix") -> d
         "last_checked_at": created_at,
         "valid_until": minutes_from_now(5),
         "last_error_code": findings[0]["code"] if findings else None,
-        "redacted_message": None if auth_ready else (USER_MESSAGES["fixture_only"] if fixture_ready else USER_MESSAGES.get(mode, USER_MESSAGES["unknown"])),
-        "auth_message": None if auth_ready else (USER_MESSAGES["fixture_only"] if fixture_ready else USER_MESSAGES.get(mode, USER_MESSAGES["unknown"])),
+        "redacted_message": status_message,
+        "auth_message": status_message,
+        "next_action": LOGIN_REQUIRED_NEXT_ACTION if mode == "login_required" else None,
         "findings": findings,
         "installed_path": str(installed_path),
         "trusted_hook_count": len(entries),
         "platform": platform,
+        "fixture_mode": fixture_mode,
     }
     return report
 
@@ -559,13 +616,18 @@ def main(argv: list[str] | None = None) -> int:
         sub.add_argument("--codex-home", type=Path, default=default_codex_home())
         sub.add_argument("--plugin-root", type=Path, default=default_plugin_root())
         sub.add_argument("--platform", choices=("posix", "windows"), default="posix")
+        sub.add_argument(
+            "--fixture-mode",
+            action="store_true",
+            help="Install or inspect the explicit local fixture hook path; not MVP readiness.",
+        )
         sub.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     try:
         if args.command == "install":
-            result = install(args.plugin_root, args.codex_home, platform=args.platform)
+            result = install(args.plugin_root, args.codex_home, platform=args.platform, fixture_mode=args.fixture_mode)
         else:
-            result = doctor(args.plugin_root, args.codex_home, platform=args.platform)
+            result = doctor(args.plugin_root, args.codex_home, platform=args.platform, fixture_mode=args.fixture_mode)
     except (OSError, ValueError) as exc:
         result = {"status": "error", "error": str(exc)}
         print(dumps_json(result) if args.json else f"error: {exc}", file=sys.stderr)

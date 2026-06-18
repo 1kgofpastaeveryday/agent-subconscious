@@ -11,10 +11,11 @@ import tempfile
 import unittest
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
-from agent_subconscious import hook_probe
+from agent_subconscious import daemon, hook_probe
 from agent_subconscious.hook_probe import capability_signature, sign_feedback_item, workspace_id
 
 
@@ -33,6 +34,7 @@ def run_hook_process(payload: dict, state_dir: Path, *, attest: bool = True) -> 
             effective_payload["subconscious_hook_attestation"] = event_attestation(hook_event_name, cwd, session_id)
     env = os.environ.copy()
     env["SUBCONSCIOUS_HOOK_PROBE_ALLOW_FIXTURE_KEY"] = "1"
+    env["SUBCONSCIOUS_GLOBAL_CONFIG_PATH"] = str(state_dir / "subconscious_global_config.json")
     return subprocess.run(
         CMD + ["--state-dir", str(state_dir)],
         cwd=ROOT,
@@ -52,6 +54,7 @@ def run_adapter_process(
 ) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["SUBCONSCIOUS_HOOK_PROBE_ALLOW_FIXTURE_KEY"] = "1"
+    env["SUBCONSCIOUS_GLOBAL_CONFIG_PATH"] = str(state_dir / "subconscious_global_config.json")
     if assume_main_agent:
         env["SUBCONSCIOUS_CODEX_ADAPTER_ASSUME_MAIN_AGENT"] = "1"
     else:
@@ -109,6 +112,52 @@ def make_feedback(
     }
     item["signature"] = sign_feedback_item(item, b"agent-subconscious-fixture-only-key")
     return item
+
+
+def make_sub_note(
+    cwd: Path,
+    session_id: str,
+    derived_turn: str,
+    body: str,
+    *,
+    confidence: str = "high",
+    risk: str = "verification",
+) -> dict:
+    return hook_probe.make_sub_note(
+        str(cwd),
+        session_id,
+        derived_turn,
+        body,
+        confidence=confidence,
+        risk=risk,
+        source="fake_local",
+    )
+
+
+@contextmanager
+def live_sub_note_server(state_dir: Path, *notes: dict):
+    pending = daemon.PendingSubNoteQueue()
+    for note in notes:
+        pending.add(note)
+    server = daemon.SubNoteIpcServer(state_dir, pending, "test-token")
+    server.start()
+    with hook_probe.locked_state(state_dir):
+        daemon.write_daemon_status(
+            state_dir,
+            daemon.daemon_status_record(
+                state_dir,
+                state="running",
+                pid=os.getpid(),
+                started_at=None,
+                ipc_url=server.url,
+                ipc_token="test-token",
+                pending_sub_notes=len(pending),
+            ),
+        )
+    try:
+        yield server
+    finally:
+        server.stop()
 
 
 def seed_prior_observation(
@@ -197,6 +246,26 @@ class HookProbeTests(unittest.TestCase):
     def test_feedback_body_accepts_documented_intent_mismatch_shape(self) -> None:
         self.assertTrue(hook_probe.safe_feedback_body("intent mismatch: user asked for product judgment."))
         self.assertTrue(hook_probe.safe_feedback_body('evidence: reviewer noted "missing tests" in output.'))
+        self.assertTrue(hook_probe.safe_feedback_body("verification gap: tests were not run after code changes."))
+        self.assertTrue(hook_probe.safe_feedback_body("correctness risk: code changed while failures were reported."))
+        self.assertTrue(hook_probe.safe_feedback_body("evidence: code changed and verification passed."))
+        self.assertTrue(
+            hook_probe.safe_sub_note_body(
+                "Main Agent changed code without verification; before continuing, prove the changed path with the smallest focused check."
+            )
+        )
+
+    def test_secret_redaction_consumes_full_authorization_header(self) -> None:
+        text, omitted = hook_probe.bounded_text(
+            "authorization: Bearer abcdefghijklmnop and Authorization: Basic abcdefghijklmno and api_key=fake-secret-for-redaction",
+            500,
+        )
+
+        self.assertIn("[REDACTED]", text)
+        self.assertNotIn("abcdefghijklmnop", text)
+        self.assertNotIn("abcdefghijklmno", text)
+        self.assertNotIn("fake_live_abcdefghijklmnopqrstuvwxyz", text)
+        self.assertTrue(all(item["reason"] == "secret" for item in omitted))
 
     def test_workspace_id_is_not_plain_path_hash(self) -> None:
         with mock.patch.dict(os.environ, {hook_probe.WORKSPACE_ID_KEY_ENV: "test-workspace-id-key"}):
@@ -297,6 +366,55 @@ class HookProbeTests(unittest.TestCase):
             self.assertEqual(event["summary"], "assistant output unavailable")
             self.assertEqual(event["omitted"][0]["field"], "last_assistant_message")
 
+    def test_stop_summary_stores_features_without_raw_assistant_text(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state_dir = Path(temp)
+            register_capability(state_dir)
+            output = run_hook(
+                {
+                    "hook_event_name": "Stop",
+                    "session_id": "sess_1",
+                    "turn_id": "turn1",
+                    "cwd": str(ROOT),
+                    "last_assistant_message": "Implemented hook injection in agent_subconscious/hook_probe.py. Tests passed.",
+                },
+                state_dir,
+            )
+
+            self.assertEqual(output, {})
+            event = read_jsonl(state_dir / "observation_events.jsonl")[-1]
+            self.assertIn("last_assistant_message_signals=tests_passed,code_changed", event["summary"])
+            self.assertIn("work_kind=code", event["summary"])
+            self.assertIn("verification=passed", event["summary"])
+            self.assertIn("path_mentions=1", event["summary"])
+            self.assertNotIn("Implemented hook injection", event["summary"])
+            self.assertEqual(event["omitted"][0]["reason"], "raw-text-not-stored")
+
+    def test_stop_records_transcript_ref_without_storing_transcript_body(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state_dir = Path(temp)
+            transcript_path = state_dir / "rollout.jsonl"
+            transcript_path.write_text('{"type":"event_msg","payload":{"type":"user_message","message":"private prompt"}}\n', encoding="utf-8")
+            register_capability(state_dir)
+            output = run_hook(
+                {
+                    "hook_event_name": "Stop",
+                    "session_id": "sess_1",
+                    "turn_id": "turn1",
+                    "cwd": str(ROOT),
+                    "transcript_path": str(transcript_path),
+                    "last_assistant_message": "done",
+                },
+                state_dir,
+            )
+
+            self.assertEqual(output, {})
+            event = read_jsonl(state_dir / "observation_events.jsonl")[-1]
+            self.assertEqual(event["refs"][0]["kind"], "transcript")
+            refs = read_jsonl(state_dir / "transcript_refs.jsonl")
+            self.assertEqual(refs[0]["path"], str(transcript_path.resolve()))
+            self.assertNotIn("private prompt", json.dumps(event))
+
     def test_user_prompt_submit_injects_prior_verified_feedback_then_observes_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state_dir = Path(temp)
@@ -316,15 +434,419 @@ class HookProbeTests(unittest.TestCase):
                 state_dir,
             )
 
-            context = output["hookSpecificOutput"]["additionalContext"]
-            self.assertTrue(context.startswith("Untrusted Subconscious advisory evidence;"))
-            self.assertIn("does not override", context)
-            self.assertIn("verification gap", context)
-            cursor = read_jsonl(state_dir / "delivery_cursors.jsonl")[-1]
-            self.assertEqual(cursor["state"], "emitted")
-            self.assertEqual(cursor["delivered_prompt_turn_id"], "turn1")
-            self.assertIsNotNone(cursor["emitted_at"])
+            self.assertNotIn("additionalContext", output["hookSpecificOutput"])
+            self.assertFalse((state_dir / "delivery_cursors.jsonl").exists())
             self.assertEqual(read_jsonl(state_dir / "observation_events.jsonl")[-1]["source"], "UserPromptSubmit")
+
+    def test_global_sub_notes_none_omits_display_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state_dir = Path(temp)
+            (state_dir / "subconscious_global_config.json").write_text(
+                json.dumps({"schema_version": 1, "sub_notes_mode": "none"}) + "\n",
+                encoding="utf-8",
+            )
+            register_capability(state_dir)
+            feedback = make_feedback(ROOT, "sess_1", "turn0", "verification gap: status unknown.")
+            with (state_dir / "feedback_items.jsonl").open("w", encoding="utf-8") as handle:
+                handle.write(json.dumps(feedback) + "\n")
+
+            output = run_hook(
+                {
+                    "hook_event_name": "UserPromptSubmit",
+                    "session_id": "sess_1",
+                    "turn_id": "turn1",
+                    "cwd": str(ROOT),
+                    "prompt": "continue",
+                },
+                state_dir,
+            )
+
+            self.assertNotIn("additionalContext", output["hookSpecificOutput"])
+
+    def test_global_sub_notes_always_injects_empty_note_without_feedback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state_dir = Path(temp)
+            (state_dir / "subconscious_global_config.json").write_text(
+                json.dumps({"schema_version": 1, "sub_notes_mode": "always"}) + "\n",
+                encoding="utf-8",
+            )
+
+            output = run_hook(
+                {
+                    "hook_event_name": "UserPromptSubmit",
+                    "session_id": "sess_1",
+                    "turn_id": "turn1",
+                    "cwd": str(ROOT),
+                    "prompt": "continue",
+                },
+                state_dir,
+            )
+
+            self.assertTrue(output["hookSpecificOutput"]["additionalContext"].startswith("Sub notes: none"))
+            self.assertIn("Sub notes: none", output["hookSpecificOutput"]["additionalContext"])
+            live = read_jsonl(state_dir / "live_event_log.jsonl")
+            self.assertEqual(live[-1]["event_type"], "UserPromptSubmit")
+            self.assertEqual(live[-1]["session_id"], "sess_1")
+            self.assertEqual(live[-1]["injection"]["received"], True)
+            self.assertEqual(live[-1]["injection"]["kind"], "none")
+            self.assertEqual(live[-1]["injection"]["prompt_kind"], "real_user_prompt")
+
+    def test_hook_invocation_writes_auditable_live_event_log(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state_dir = Path(temp)
+            transcript_path = state_dir / "rollout.jsonl"
+            transcript_path.write_text('{"type":"event_msg","payload":{"type":"agent_message","message":"done"}}\n', encoding="utf-8")
+            register_capability(state_dir)
+
+            run_hook(
+                {
+                    "hook_event_name": "Stop",
+                    "session_id": "sess_1",
+                    "turn_id": "turn1",
+                    "cwd": str(ROOT),
+                    "transcript_path": str(transcript_path),
+                    "last_assistant_message": "implemented hook changes. tests were not run.",
+                },
+                state_dir,
+            )
+
+            live = read_jsonl(state_dir / "live_event_log.jsonl")
+            self.assertEqual(live[-1]["session_id"], "sess_1")
+            self.assertEqual(live[-1]["event_type"], "Stop")
+            self.assertIsNotNone(live[-1]["observed_at"])
+            self.assertEqual(live[-1]["source_file_path"], str(transcript_path.resolve()))
+
+    def test_user_prompt_submit_logs_non_empty_note_delivery_proof(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state_dir = Path(temp)
+            (state_dir / "subconscious_global_config.json").write_text(
+                json.dumps({"schema_version": 1, "sub_notes_mode": "always"}) + "\n",
+                encoding="utf-8",
+            )
+            register_capability(state_dir)
+            note = make_sub_note(
+                ROOT,
+                "sess_1",
+                "turn0",
+                "Main Agent changed code without verification; prove the changed path before expanding scope.",
+            )
+            with live_sub_note_server(state_dir, note):
+                output = run_hook(
+                    {
+                        "hook_event_name": "UserPromptSubmit",
+                        "session_id": "sess_1",
+                        "turn_id": "turn1",
+                        "cwd": str(ROOT),
+                        "prompt": "continue",
+                    },
+                    state_dir,
+                )
+
+            context = output["hookSpecificOutput"]["additionalContext"]
+            self.assertTrue(context.startswith("Sub notes: Main Agent changed code without verification"))
+            live = read_jsonl(state_dir / "live_event_log.jsonl")[-1]
+            delivery = read_jsonl(state_dir / "sub_note_deliveries.jsonl")[-1]
+            self.assertEqual(live["injection"]["kind"], "non_empty")
+            self.assertEqual(live["injection"]["prompt_kind"], "real_user_prompt")
+            self.assertEqual(live["injection"]["note_body_digest"], "sha256:" + hook_probe.sha256_hex(note["body"]))
+            self.assertEqual(live["injection"]["note_created_at"], note["created_at"])
+            self.assertEqual(live["injection"]["derived_from_turn_id"], "turn0")
+            self.assertEqual(live["injection"]["claimed_prompt_turn_id"], "turn1")
+            self.assertEqual(delivery["state"], "emitted")
+            self.assertEqual(delivery["delivered_prompt_turn_id"], "turn1")
+            self.assertIn("Sub note marker:", context)
+            self.assertIn("target_session_id=sess_1", context)
+            self.assertIn("target_turn_id=turn1", context)
+            self.assertIn("Ignore historical Sub notes", context)
+            self.assertEqual(live["injection"]["target_session_id"], "sess_1")
+            self.assertEqual(live["injection"]["target_turn_id"], "turn1")
+
+    def test_live_sub_note_for_session_a_is_dropped_when_session_b_is_active(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state_dir = Path(temp)
+            register_capability(state_dir, session_id="sess_A")
+            register_capability(state_dir, session_id="sess_B", seed_prior=False)
+            note = make_sub_note(
+                ROOT,
+                "sess_A",
+                "turn0",
+                "verification gap: session a note must stay scoped to session a.",
+            )
+            with live_sub_note_server(state_dir, note):
+                output_b = run_hook(
+                    {
+                        "hook_event_name": "UserPromptSubmit",
+                        "session_id": "sess_B",
+                        "turn_id": "turn1",
+                        "cwd": str(ROOT),
+                        "prompt": "continue in b",
+                    },
+                    state_dir,
+                )
+                output_a = run_hook(
+                    {
+                        "hook_event_name": "UserPromptSubmit",
+                        "session_id": "sess_A",
+                        "turn_id": "turn1",
+                        "cwd": str(ROOT),
+                        "prompt": "continue in a",
+                    },
+                    state_dir,
+                )
+
+            self.assertNotIn("additionalContext", output_b["hookSpecificOutput"])
+            self.assertNotIn("additionalContext", output_a["hookSpecificOutput"])
+
+    def test_live_sub_note_for_turn_a_does_not_remain_valid_in_turn_b(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state_dir = Path(temp)
+            register_capability(state_dir)
+            note = make_sub_note(
+                ROOT,
+                "sess_1",
+                "turn0",
+                "verification gap: one turn note must be single use.",
+            )
+            with live_sub_note_server(state_dir, note):
+                first = run_hook(
+                    {
+                        "hook_event_name": "UserPromptSubmit",
+                        "session_id": "sess_1",
+                        "turn_id": "turn1",
+                        "cwd": str(ROOT),
+                        "prompt": "continue",
+                    },
+                    state_dir,
+                )
+                second = run_hook(
+                    {
+                        "hook_event_name": "UserPromptSubmit",
+                        "session_id": "sess_1",
+                        "turn_id": "turn2",
+                        "cwd": str(ROOT),
+                        "prompt": "continue again",
+                    },
+                    state_dir,
+                )
+
+            self.assertIn("target_turn_id=turn1", first["hookSpecificOutput"]["additionalContext"])
+            self.assertNotIn("additionalContext", second["hookSpecificOutput"])
+
+    def test_user_prompt_submit_injects_fake_local_sub_note_fixture(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state_dir = Path(temp)
+            register_capability(state_dir)
+            note = make_sub_note(
+                ROOT,
+                "sess_1",
+                "turn0",
+                "Main Agent may have proved the hook path, but the simpler product shape is a one-turn-lag idea generator rather than a review warning bot.",
+            )
+            with live_sub_note_server(state_dir, note):
+                output = run_hook(
+                    {
+                        "hook_event_name": "UserPromptSubmit",
+                        "session_id": "sess_1",
+                        "turn_id": "turn1",
+                        "cwd": str(ROOT),
+                        "prompt": "continue",
+                    },
+                    state_dir,
+                )
+
+            context = output["hookSpecificOutput"]["additionalContext"]
+            self.assertTrue(context.startswith("Sub notes: Main Agent may have proved the hook path"))
+            self.assertIn("Sub note marker:", context)
+            self.assertIn("target_session_id=sess_1", context)
+            self.assertIn("target_turn_id=turn1", context)
+            self.assertIn("Ignore historical Sub notes", context)
+            deliveries = read_jsonl(state_dir / "sub_note_deliveries.jsonl")
+            self.assertEqual(deliveries[-1]["state"], "emitted")
+            self.assertEqual(deliveries[-1]["message_id"], note["message_id"])
+
+    def test_user_prompt_submit_rejects_low_value_sub_note_fixture(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state_dir = Path(temp)
+            register_capability(state_dir)
+            note = make_sub_note(
+                ROOT,
+                "sess_1",
+                "turn0",
+                "verification gap: verification status was not visible after a code related turn.",
+                confidence="medium",
+            )
+            with (state_dir / "sub_notes.jsonl").open("w", encoding="utf-8") as handle:
+                handle.write(json.dumps(note) + "\n")
+
+            output = run_hook(
+                {
+                    "hook_event_name": "UserPromptSubmit",
+                    "session_id": "sess_1",
+                    "turn_id": "turn1",
+                    "cwd": str(ROOT),
+                    "prompt": "continue",
+                },
+                state_dir,
+            )
+
+            self.assertNotIn("additionalContext", output["hookSpecificOutput"])
+            self.assertFalse((state_dir / "sub_note_deliveries.jsonl").exists())
+
+    def test_user_prompt_submit_does_not_store_current_prompt_observation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state_dir = Path(temp)
+            register_capability(state_dir)
+
+            run_hook(
+                {
+                    "hook_event_name": "UserPromptSubmit",
+                    "session_id": "sess_1",
+                    "turn_id": "turn1",
+                    "cwd": str(ROOT),
+                    "prompt": "very specific private prompt text",
+                },
+                state_dir,
+            )
+
+            state = (state_dir / "observation_events.jsonl").read_text(encoding="utf-8")
+            self.assertNotIn("very specific private prompt text", state)
+            self.assertIn('"source":"UserPromptSubmit"', state)
+            self.assertIn("raw_text_stored=false", state)
+
+    def test_user_prompt_submit_rejects_replayed_sub_note_after_emit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state_dir = Path(temp)
+            register_capability(state_dir)
+            note = make_sub_note(
+                ROOT,
+                "sess_1",
+                "turn0",
+                "Main Agent may have proved the hook path, but the simpler product shape is a one-turn-lag idea generator rather than a review warning bot.",
+            )
+            payload = {
+                "hook_event_name": "UserPromptSubmit",
+                "session_id": "sess_1",
+                "turn_id": "turn1",
+                "cwd": str(ROOT),
+                "prompt": "continue",
+            }
+
+            with live_sub_note_server(state_dir, note):
+                first = run_hook(payload, state_dir)
+                second = run_hook(payload, state_dir)
+
+            self.assertIn("additionalContext", first["hookSpecificOutput"])
+            self.assertNotIn("additionalContext", second["hookSpecificOutput"])
+
+    def test_user_prompt_submit_does_not_inject_sub_note_body_from_disk(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state_dir = Path(temp)
+            register_capability(state_dir)
+            note = make_sub_note(
+                ROOT,
+                "sess_1",
+                "turn0",
+                "Main Agent wrote a durable fixture note; this must not replay from disk.",
+            )
+            with (state_dir / "sub_notes.jsonl").open("w", encoding="utf-8") as handle:
+                handle.write(json.dumps(note) + "\n")
+
+            output = run_hook(
+                {
+                    "hook_event_name": "UserPromptSubmit",
+                    "session_id": "sess_1",
+                    "turn_id": "turn1",
+                    "cwd": str(ROOT),
+                    "prompt": "continue",
+                },
+                state_dir,
+            )
+
+            self.assertNotIn("additionalContext", output["hookSpecificOutput"])
+            self.assertFalse((state_dir / "sub_note_deliveries.jsonl").exists())
+
+    def test_pending_sub_note_body_is_lost_without_live_daemon(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state_dir = Path(temp)
+            register_capability(state_dir)
+            note = make_sub_note(
+                ROOT,
+                "sess_1",
+                "turn0",
+                "Main Agent has a pending RAM note; restart loss is intentional.",
+            )
+            hook_probe.append_jsonl(state_dir / "sub_notes.jsonl", daemon.sub_note_audit_record(note))
+
+            output = run_hook(
+                {
+                    "hook_event_name": "UserPromptSubmit",
+                    "session_id": "sess_1",
+                    "turn_id": "turn1",
+                    "cwd": str(ROOT),
+                    "prompt": "continue",
+                },
+                state_dir,
+            )
+
+            self.assertNotIn("additionalContext", output["hookSpecificOutput"])
+            self.assertNotIn("body", read_jsonl(state_dir / "sub_notes.jsonl")[0])
+
+    def test_user_prompt_submit_rejects_sub_note_from_different_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state_dir = Path(temp)
+            register_capability(state_dir, session_id="sess_2")
+            note = make_sub_note(
+                ROOT,
+                "sess_1",
+                "turn0",
+                "Main Agent may have proved the hook path, but the simpler product shape is a one-turn-lag idea generator rather than a review warning bot.",
+            )
+            with (state_dir / "sub_notes.jsonl").open("w", encoding="utf-8") as handle:
+                handle.write(json.dumps(note) + "\n")
+
+            output = run_hook(
+                {
+                    "hook_event_name": "UserPromptSubmit",
+                    "session_id": "sess_2",
+                    "turn_id": "turn1",
+                    "cwd": str(ROOT),
+                    "prompt": "continue",
+                },
+                state_dir,
+            )
+
+            self.assertNotIn("additionalContext", output["hookSpecificOutput"])
+
+    def test_user_prompt_submit_skips_duplicate_sub_note_body_within_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state_dir = Path(temp)
+            register_capability(state_dir)
+            first = make_sub_note(ROOT, "sess_1", "turn0", "Main Agent explored the direct path; the alternate angle is to keep this as one delayed product note.")
+            second = make_sub_note(ROOT, "sess_1", "turn2", "Main Agent explored the direct path; the alternate angle is to keep this as one delayed product note.")
+            with live_sub_note_server(state_dir, first, second):
+                output = run_hook(
+                    {
+                        "hook_event_name": "UserPromptSubmit",
+                        "session_id": "sess_1",
+                        "turn_id": "turn1",
+                        "cwd": str(ROOT),
+                        "prompt": "continue",
+                    },
+                    state_dir,
+                )
+
+            self.assertIn("one delayed product note", output["hookSpecificOutput"]["additionalContext"])
+            deliveries = read_jsonl(state_dir / "sub_note_deliveries.jsonl")
+            self.assertEqual(
+                deliveries[-1]["dedupe_key"],
+                hook_probe.sub_note_dedupe_key(
+                    workspace_id(str(ROOT)),
+                    "sess_1",
+                    "verification",
+                    "high",
+                    "Main Agent explored the direct path; the alternate angle is to keep this as one delayed product note.",
+                ),
+            )
 
     def test_user_prompt_submit_rejects_replayed_feedback_after_claim(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -346,13 +868,11 @@ class HookProbeTests(unittest.TestCase):
             first = run_hook(payload, state_dir)
             second = run_hook(payload, state_dir)
 
-            self.assertIn("additionalContext", first["hookSpecificOutput"])
+            self.assertNotIn("additionalContext", first["hookSpecificOutput"])
             self.assertNotIn("additionalContext", second["hookSpecificOutput"])
-            cursors = read_jsonl(state_dir / "delivery_cursors.jsonl")
-            self.assertEqual(len(cursors), 2)
-            self.assertEqual(cursors[-1]["state"], "emitted")
+            self.assertFalse((state_dir / "delivery_cursors.jsonl").exists())
 
-    def test_user_prompt_submit_without_supported_main_marker_fails_closed(self) -> None:
+    def test_user_prompt_submit_with_attestation_bootstraps_current_session(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state_dir = Path(temp)
             feedback = make_feedback(ROOT, "sess_1", "turn0", "verification gap: status unknown.")
@@ -368,6 +888,30 @@ class HookProbeTests(unittest.TestCase):
                     "prompt": "continue",
                 },
                 state_dir,
+            )
+
+            self.assertNotIn("additionalContext", output["hookSpecificOutput"])
+            self.assertFalse((state_dir / "delivery_cursors.jsonl").exists())
+            self.assertTrue((state_dir / "session_capabilities.jsonl").exists())
+            self.assertEqual(read_jsonl(state_dir / "observation_events.jsonl")[-1]["source"], "UserPromptSubmit")
+
+    def test_user_prompt_submit_without_attestation_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state_dir = Path(temp)
+            feedback = make_feedback(ROOT, "sess_1", "turn0", "verification gap: status unknown.")
+            with (state_dir / "feedback_items.jsonl").open("w", encoding="utf-8") as handle:
+                handle.write(json.dumps(feedback) + "\n")
+
+            output = run_hook(
+                {
+                    "hook_event_name": "UserPromptSubmit",
+                    "session_id": "sess_1",
+                    "turn_id": "turn1",
+                    "cwd": str(ROOT),
+                    "prompt": "continue",
+                },
+                state_dir,
+                attest=False,
             )
 
             self.assertNotIn("additionalContext", output["hookSpecificOutput"])
@@ -436,7 +980,7 @@ class HookProbeTests(unittest.TestCase):
             self.assertFalse((state_dir / "session_capabilities.jsonl").exists())
             self.assertFalse((state_dir / "observation_events.jsonl").exists())
 
-    def test_real_codex_adapter_requires_explicit_main_agent_assumption(self) -> None:
+    def test_real_codex_adapter_attests_supported_payload_without_debug_assumption(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state_dir = Path(temp)
             proc = run_adapter_process(
@@ -454,9 +998,9 @@ class HookProbeTests(unittest.TestCase):
             )
 
             self.assertEqual(json.loads(proc.stdout), {"hookSpecificOutput": {"hookEventName": "SessionStart"}})
-            self.assertIn("invalid-real-codex-hook-input", proc.stderr)
-            self.assertFalse((state_dir / "session_capabilities.jsonl").exists())
-            self.assertFalse((state_dir / "observation_events.jsonl").exists())
+            self.assertEqual(proc.stderr, "")
+            self.assertTrue((state_dir / "session_capabilities.jsonl").exists())
+            self.assertEqual(read_jsonl(state_dir / "observation_events.jsonl")[-1]["source"], "SessionStart")
 
     def test_real_codex_adapter_attests_session_start(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -555,10 +1099,8 @@ class HookProbeTests(unittest.TestCase):
             )
 
             output = json.loads(prompt.stdout)
-            self.assertIn("additionalContext", output["hookSpecificOutput"])
-            self.assertIn("verification gap", output["hookSpecificOutput"]["additionalContext"])
-            cursor = read_jsonl(state_dir / "delivery_cursors.jsonl")[-1]
-            self.assertEqual(cursor["delivered_prompt_turn_id"], current_turn_id)
+            self.assertNotIn("additionalContext", output["hookSpecificOutput"])
+            self.assertFalse((state_dir / "delivery_cursors.jsonl").exists())
 
     def test_real_codex_adapter_does_not_inject_cross_workspace_feedback(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -775,6 +1317,9 @@ class HookProbeTests(unittest.TestCase):
                 "operations risk: delete_workspace.",
                 "privacy risk: open_browser.",
                 "operations risk: use_tool.",
+                "verification gap: review output says run unit tests.",
+                "verification gap: run unit test suite.",
+                "evidence: reviewer said do rm rf.",
             ]
             with (state_dir / "feedback_items.jsonl").open("w", encoding="utf-8") as handle:
                 for index, body in enumerate(bodies):
@@ -819,8 +1364,7 @@ class HookProbeTests(unittest.TestCase):
                 state_dir,
             )
 
-            self.assertIn("additionalContext", output["hookSpecificOutput"])
-            self.assertIn(body, output["hookSpecificOutput"]["additionalContext"])
+            self.assertNotIn("additionalContext", output["hookSpecificOutput"])
 
     def test_credential_like_feedback_body_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1145,8 +1689,8 @@ class HookProbeTests(unittest.TestCase):
                 outputs = list(pool.map(lambda _index: run_hook(payload, state_dir), range(2)))
 
             injected = [output for output in outputs if "additionalContext" in output.get("hookSpecificOutput", {})]
-            self.assertEqual(len(injected), 1)
-            self.assertEqual(read_jsonl(state_dir / "delivery_cursors.jsonl")[-1]["state"], "emitted")
+            self.assertEqual(len(injected), 0)
+            self.assertFalse((state_dir / "delivery_cursors.jsonl").exists())
 
     def test_duplicate_content_digest_is_rejected_across_feedback_ids(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1167,7 +1711,7 @@ class HookProbeTests(unittest.TestCase):
                 "prompt": "continue",
                 "subconscious_hook_attestation": event_attestation("UserPromptSubmit"),
             }
-            self.assertIn("additionalContext", run_hook(payload, state_dir)["hookSpecificOutput"])
+            self.assertNotIn("additionalContext", run_hook(payload, state_dir)["hookSpecificOutput"])
             with (state_dir / "feedback_items.jsonl").open("w", encoding="utf-8") as handle:
                 handle.write(json.dumps(second) + "\n")
 
@@ -1193,7 +1737,7 @@ class HookProbeTests(unittest.TestCase):
                 "cwd": str(ROOT),
                 "prompt": "continue",
             }
-            self.assertIn("additionalContext", run_hook(first_payload, state_dir)["hookSpecificOutput"])
+            self.assertNotIn("additionalContext", run_hook(first_payload, state_dir)["hookSpecificOutput"])
             with (state_dir / "feedback_items.jsonl").open("w", encoding="utf-8") as handle:
                 handle.write(json.dumps(second) + "\n")
 
@@ -1332,8 +1876,8 @@ class HookProbeTests(unittest.TestCase):
 
             rendered = stdout.getvalue().strip()
             self.assertEqual(rendered.count("\n"), 0)
-            self.assertIn("additionalContext", json.loads(rendered)["hookSpecificOutput"])
-            self.assertEqual(read_jsonl(state_dir / "delivery_cursors.jsonl")[-1]["state"], "claimed")
+            self.assertIn("Sub notes: none", json.loads(rendered)["hookSpecificOutput"]["additionalContext"])
+            self.assertFalse((state_dir / "delivery_cursors.jsonl").exists())
 
     def test_stdout_flush_failure_does_not_print_fallback_json(self) -> None:
         class FlakyStdout(io.StringIO):
@@ -1400,8 +1944,9 @@ class HookProbeTests(unittest.TestCase):
                 "cwd": str(ROOT),
                 "prompt": "continue",
             }
-            self.assertIn("additionalContext", run_hook(payload, state_dir)["hookSpecificOutput"])
-            emitted = read_jsonl(state_dir / "delivery_cursors.jsonl")[-1]
+            emitted = hook_probe.emitted_cursor(hook_probe.cursor_for_feedback(feedback, payload))
+            with (state_dir / "delivery_cursors.jsonl").open("w", encoding="utf-8") as handle:
+                handle.write(json.dumps(emitted) + "\n")
             regressed = dict(emitted)
             regressed["state"] = "claimed"
             regressed["delivered_prompt_turn_id"] = None
@@ -1433,9 +1978,9 @@ class HookProbeTests(unittest.TestCase):
 
             output = run_hook(payload, state_dir)
 
-            self.assertIn("additionalContext", output["hookSpecificOutput"])
+            self.assertNotIn("additionalContext", output["hookSpecificOutput"])
             cursors = read_jsonl(state_dir / "delivery_cursors.jsonl")
-            self.assertEqual(cursors[-1]["state"], "emitted")
+            self.assertEqual(cursors[-1]["state"], "claimed")
 
     def test_claimed_cursor_blocks_different_turn_retry(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

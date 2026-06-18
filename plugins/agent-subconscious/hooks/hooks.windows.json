@@ -7,8 +7,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"${PLUGIN_ROOT}\\bin\\subconscious_hook.py\" with-daemon",
-            "timeout": 5,
+            "command": "C:\\Users\\4\\AppData\\Local\\Programs\\Python\\Python312\\python.exe \"D:\\working\\agent-subconscious\\plugins\\agent-subconscious\\bin\\subconscious_hook.py\" with-daemon --debug-assume-main-agent --debug-allow-fixture-key",
+            "timeout": 30,
             "statusMessage": "Starting Agent Subconscious"
           }
         ]
@@ -19,8 +19,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"${PLUGIN_ROOT}\\bin\\subconscious_hook.py\" with-daemon",
-            "timeout": 5,
+            "command": "C:\\Users\\4\\AppData\\Local\\Programs\\Python\\Python312\\python.exe \"D:\\working\\agent-subconscious\\plugins\\agent-subconscious\\bin\\subconscious_hook.py\" with-daemon --debug-assume-main-agent --debug-allow-fixture-key",
+            "timeout": 30,
             "statusMessage": "Checking Agent Subconscious"
           }
         ]
@@ -31,8 +31,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"${PLUGIN_ROOT}\\bin\\subconscious_hook.py\" with-daemon",
-            "timeout": 5,
+            "command": "C:\\Users\\4\\AppData\\Local\\Programs\\Python\\Python312\\python.exe \"D:\\working\\agent-subconscious\\plugins\\agent-subconscious\\bin\\subconscious_hook.py\" with-daemon --debug-assume-main-agent --debug-allow-fixture-key",
+            "timeout": 30,
             "statusMessage": "Recording Agent Subconscious observation"
           }
         ]

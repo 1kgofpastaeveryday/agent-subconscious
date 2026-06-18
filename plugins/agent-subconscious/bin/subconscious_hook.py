@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import tempfile
+import traceback
 from io import StringIO
 from pathlib import Path
 
@@ -63,7 +65,12 @@ def daemon_process_kwargs() -> dict:
         "stderr": subprocess.DEVNULL,
     }
     if os.name == "nt":
-        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        flags |= getattr(subprocess, "DETACHED_PROCESS", 0)
+        flags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        flags |= getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0)
+        kwargs["creationflags"] = flags
+        kwargs["close_fds"] = True
     else:
         kwargs["start_new_session"] = True
     return kwargs
@@ -97,20 +104,28 @@ def ensure_workspace_daemon(args: list[str], cwd_hint: str | None = None, payloa
         return
     interval = max(float_env(DAEMON_INTERVAL_ENV, daemon.DEFAULT_INTERVAL_SECONDS), 0.25)
     idle_timeout = float_env(DAEMON_IDLE_TIMEOUT_ENV, daemon.DEFAULT_IDLE_TIMEOUT_SECONDS)
+    engine_args = desired_engine_args(state_dir)
+    watcher_args = rollout_watcher_args(args, cwd_hint)
     command = [
         sys.executable,
         str(Path(__file__).resolve()),
         "daemon",
         "--quiet",
+        *watcher_args,
         "--interval",
         str(interval),
         "--idle-timeout",
         str(idle_timeout),
+        *engine_args,
         *state_dir_args(args, cwd_hint),
     ]
     with hook_probe.locked_state(state_dir):
-        if daemon.daemon_status_is_live(daemon.read_daemon_status(state_dir), state_dir):
+        status = daemon.read_daemon_status(state_dir)
+        needs_watcher = bool(watcher_args)
+        has_required_watcher = not needs_watcher or (isinstance(status, dict) and status.get("rollout_watcher_enabled") is True)
+        if daemon.daemon_status_is_live(status, state_dir) and has_required_watcher:
             return
+        stop_stale_daemon(status)
         proc = subprocess.Popen(command, **daemon_process_kwargs())
         daemon.write_daemon_status(
             state_dir,
@@ -121,6 +136,38 @@ def ensure_workspace_daemon(args: list[str], cwd_hint: str | None = None, payloa
                 started_at=None,
             ),
         )
+
+
+def stop_stale_daemon(status: dict | None) -> None:
+    if not isinstance(status, dict):
+        return
+    pid = status.get("pid")
+    if not isinstance(pid, int) or pid <= 0 or pid == os.getpid():
+        return
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        else:
+            os.kill(pid, 15)
+    except OSError:
+        return
+
+
+def desired_engine_args(state_dir: Path) -> list[str]:
+    try:
+        from agent_subconscious import llm_engine
+
+        if llm_engine.chatgpt_plan_backend_enabled(state_dir) and llm_engine.has_fresh_chatgpt_plan_access_token(state_dir):
+            return ["--engine", llm_engine.CHATGPT_PLAN_PROVIDER]
+    except Exception:
+        return []
+    return []
+
+
+def rollout_watcher_args(args: list[str], cwd_hint: str | None) -> list[str]:
+    if "--debug-allow-fixture-key" in args or os.environ.get("SUBCONSCIOUS_HOOK_PROBE_ALLOW_FIXTURE_KEY") == "1":
+        return []
+    return ["--enable-rollout-watcher", "--cwd", str(Path(cwd_hint or os.getcwd()))]
 
 
 def payload_from_stdin(raw_stdin: str) -> dict | None:
@@ -152,6 +199,10 @@ def run_adapter_with_stdin(args: list[str], raw_stdin: str) -> int:
 
 def main() -> int:
     add_import_roots()
+    if len(sys.argv) > 1 and sys.argv[1] in {"login", "status", "enable", "run", "sub-notes", "watch-rollout", "diagnose"}:
+        from agent_subconscious.cli import main as cli_main
+
+        return cli_main(sys.argv[1:])
     if len(sys.argv) > 1 and sys.argv[1] == "daemon":
         from agent_subconscious.daemon import main as daemon_main
 
@@ -184,5 +235,31 @@ def main() -> int:
     return adapter_main()
 
 
+def fail_closed_main() -> int:
+    try:
+        return main()
+    except BaseException as exc:
+        if len(sys.argv) > 1 and sys.argv[1] in {"with-daemon", "stop-with-daemon", "daemon", "daemon-once"}:
+            write_emergency_diagnostic(exc)
+            try:
+                print("{}")
+            except OSError:
+                pass
+            return 0
+        raise
+
+
+def write_emergency_diagnostic(exc: BaseException) -> None:
+    try:
+        path = Path(tempfile.gettempdir()) / "agent-subconscious-hook-emergency.log"
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(f"argv={sys.argv!r}\n")
+            handle.write(f"error={type(exc).__name__}: {exc}\n")
+            handle.write("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+            handle.write("\n")
+    except OSError:
+        pass
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(fail_closed_main())

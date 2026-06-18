@@ -81,7 +81,7 @@ Issues identified by 2 reviewers:
 **Confidence:** HIGH  
 **Doc(s):** `plugins/agent-subconscious/hooks/hooks.json` lines 10, 22, 34; `plugins/agent-subconscious/hooks/hooks.windows.json` lines 10, 22, 34  
 **Issue:** The installed hook command runs `python3` / `python` by name. The trusted hook hash covers the command string, not the resolved interpreter path. A PATH hijack or environment drift can make every hook execute an attacker-controlled interpreter before validation runs.  
-**Evidence:** Hook entries execute `python3 "${PLUGIN_ROOT}/bin/subconscious_hook.py" with-daemon` or `python "${PLUGIN_ROOT}\bin\subconscious_hook.py" with-daemon`.  
+**Evidence:** Hook entries execute `subconscious_hook.py` through the plugin-root variable.
 **Recommendation:** At install time, resolve and pin an absolute interpreter path, record its executable identity, and have doctor fail closed if the interpreter path or digest changes.  
 **Sources:** [OWASP LLM01 Prompt Injection](https://genai.owasp.org/llmrisk/llm01-prompt-injection/), [OpenAI agent builder safety](https://developers.openai.com/api/docs/guides/agent-builder-safety)
 

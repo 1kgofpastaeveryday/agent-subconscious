@@ -1,76 +1,169 @@
 # Agent Subconscious
 
-> Not yet usable: this repository is a local design and hook-fixture spike.
-> It is not an installable or reliable product yet.
+Agent Subconscious is a local second-opinion sidecar for Codex Desktop.
 
-Agent Subconscious is a local second-opinion sidecar for coding agents.
-
-It runs beside the main agent, receives compact updates after the main agent
-works, thinks in the background, and injects feedback into the main agent's next
-prompt context.
-
-The purpose is not user-facing memory management. The purpose is to catch drift,
-missed constraints, stale assumptions, risky final answers, and user-intent
-mismatch before the main agent continues.
+It observes the active coding agent, asks a configured reviewer engine for a
+short advisory note, and injects that note into the next Codex prompt as
+dynamic context. The note is advisory evidence only; it does not override
+system, developer, user, tool, or repository instructions.
 
 ## Boundary
 
-This is a standalone local project.
+This is a standalone local experiment. It is separate from Knudg and does not
+implement public cards, team corpora, central retrieval, consent workflows,
+billing, tenant policy, or shared knowledge management.
 
-It is separate from Knudg. Knudg may later consume or inspire parts of this
-design, but this project does not implement Knudg public cards, team corpora,
-central retrieval, consent workflows, billing, or tenant policy.
+## Current Dogfood Path
 
-## MVP
+The minimally dogfoodable path for this Codex Desktop environment is:
 
-Current status: design spike, not implementation-ready MVP.
+1. Codex hooks observe `SessionStart`, `UserPromptSubmit`, and `Stop` when the
+   host dispatches those events.
+2. A local auditable log is written at `live_event_log.jsonl` under the
+   Subconscious workspace state directory. Each record includes `session_id`,
+   `turn_id`, `event_type`, `observed_at`, `observation_id`, and
+   `source_file_path` when a transcript or rollout file is available.
+3. The daemon reviews completed turn observations with the selected LLM engine.
+   A useful note body is held only in the running daemon's RAM queue. Disk gets
+   bodyless audit metadata, or an abstain/error in `llm_activity.jsonl` and
+   `observation_events.jsonl`.
+4. The next `UserPromptSubmit` hook asks the live daemon to atomically pop at
+   most one current note. A popped note is consumed before injection and cannot
+   replay unless the daemon generates a fresh note. If the daemon restarts,
+   pending undelivered note bodies are lost by design. `Sub notes: none` is only
+   an empty diagnostic in `always` mode.
+5. If `UserPromptSubmit` or `Stop` hooks do not fire, the fallback rollout
+   watcher can observe Codex session JSONL logs. Injection still requires a
+   prompt-time hook until another Codex Desktop injection surface exists.
 
-The local feedback loop below is the intended MVP shape, but implementation is
-blocked until the accepted spike decisions in
-[Open Decisions](docs/open-decisions.md) are proven by fixtures and the
-contracts in [Contracts](docs/contracts.md) are testable.
+## Setup
 
-The blocking decisions are:
+Install the local hook plugin for Windows:
 
-- accepted Codex event source and injection path
-- passing Codex hook fixture for supported product surfaces
-- Codex plugin/hook setup diagnostics and explicit backend credential model
-- signed/verifiable feedback envelope
-- durable observation, delivery, purge, and retry state
-- mechanical sanitizer and read-only tool enforcement contracts
+```powershell
+python -m agent_subconscious.codex_plugin_setup install --platform windows
+python -m agent_subconscious.codex_plugin_setup doctor --platform windows
+```
 
-Intended MVP is a local auto-start feedback loop:
+For a fresh dogfood session where you want visible injection even before the
+reviewer has a note, set always mode:
 
-1. Auto-start a local daemon with health checks and orphan cleanup.
-2. Send compact session updates after meaningful main-agent steps.
-3. Let the Subconscious agent update its own Markdown/JSON memory.
-4. Fetch new feedback when the next user prompt arrives.
-5. Inject that feedback as dynamic prompt context, not as a repo document.
-6. Allow read-only investigation and disposable/incognito browser interaction.
-7. Forbid durable mutation of the user's real workspace or authenticated
-   sessions.
+```powershell
+python -m agent_subconscious.cli sub-notes always
+```
 
-First launch must also handle Codex-side setup diagnostics explicitly. The v0
-path is Codex Plugin/hooks. If Codex reports that the Subconscious plugin
-integration is not logged in, setup should emit a redacted message such as
-`Subconscious is not logged in. To continue, ask Codex: "log in to
-subconscious".` Codex owns the interactive login/setup flow. Hooks and
-background workers must not start browser-based auth flows themselves.
+Use the live ChatGPT Plan backend when available:
 
-MVP remains blocked. The first thin hook spike may still be implemented
-without claiming MVP readiness. Fixture-ready hook/setup output means only the
-local fixture path is working; it is not proof of Codex host-surface login,
-main-agent attestation, or real prompt injection readiness.
+```powershell
+python -m agent_subconscious.cli login
+python -m agent_subconscious.cli status
+```
 
-## Non-Goals
+The login path creates an explicit workspace opt-in, opens an OpenAI OAuth URL,
+and stores the Subconscious-owned OAuth profile in local Subconscious state.
+The offline fallback reviewer remains `fake_local`.
 
-- No Letta compatibility layer requirement.
-- No long-term raw transcript memory by default.
-- No external write destinations in v0.
-- No mutation tools in v0.
-- No live interrupt mode in v0; feedback arrives on the next prompt.
-- No team or public knowledge product in this repository.
-- No Knudg dependency in local v0.
+## Verification Commands
+
+Run the unit tests:
+
+```powershell
+python -m unittest discover -s tests
+```
+
+Run the daemon once against the current workspace state:
+
+```powershell
+python -m agent_subconscious.cli run --once --enable-rollout-watcher --cwd D:\working\agent-subconscious
+```
+
+Run the rollout watcher once if hook coverage is incomplete:
+
+```powershell
+python -m agent_subconscious.cli watch-rollout --once --cwd D:\working\agent-subconscious
+```
+
+Show the live dogfood diagnostic:
+
+```powershell
+python -m agent_subconscious.cli diagnose --cwd D:\working\agent-subconscious
+```
+
+The diagnostic reports:
+
+- active Codex binary path and `codex --version` output, when available
+- latest matching Codex rollout file
+- whether `SessionStart`, `UserPromptSubmit`, and `Stop` have appeared in the
+  auditable live log
+- whether rollout watching is active
+- daemon status
+- whether the latest observed turn produced a note, abstained, failed, or is
+  pending
+- current live delivery state from the daemon RAM queue
+- historical non-empty delivery proof from bodyless audit metadata
+- whether the latest visible Sub notes proof is stale
+- readiness as `READY` only when the latest proof is a real user-prompt
+  non-empty injection with an emitted delivery record
+
+## State Files
+
+Subconscious-owned state is outside the repository under the workspace-specific
+hook state directory. Important files:
+
+- `observation_events.jsonl`: append-only sanitized observation state
+- `live_event_log.jsonl`: dogfood audit log for hook and rollout observations
+- `llm_activity.jsonl`: reviewer start, completion, abstain, and error records
+- `sub_notes.jsonl`: bodyless note audit metadata only; it is not an injection
+  source
+- `sub_note_deliveries.jsonl`: prompt-time note delivery proof without note
+  bodies
+- `rollout_watcher_status.json`: fallback watcher status
+- `transcript_refs.jsonl`: transcript path references without raw transcript
+  body storage
+
+## Current Limitations
+
+- Prompt context injection is hook-dependent. The rollout watcher can observe
+  missing `Stop` or prompt events from Codex JSONL logs, but it cannot inject
+  context unless `UserPromptSubmit` or an equivalent Codex Desktop surface runs.
+- The fallback watcher reads sanitized signals from rollout JSONL and records
+  file paths, but it does not store raw prompts or raw assistant transcripts as
+  durable memory.
+- The live ChatGPT Plan backend requires a local Subconscious OAuth login and
+  explicit workspace opt-in. Without that, `fake_local` can still produce or
+  abstain from simple diagnostic notes.
+- This repository does not enforce a read-only browser or external investigation
+  sandbox yet; those remain product hardening work.
+
+## Troubleshooting
+
+If `diagnose` says hooks are not firing, reinstall and re-run doctor:
+
+```powershell
+python -m agent_subconscious.codex_plugin_setup install --platform windows
+python -m agent_subconscious.codex_plugin_setup doctor --platform windows
+```
+
+If `Stop` is missing but Codex rollout logs exist, start the fallback watcher:
+
+```powershell
+python -m agent_subconscious.cli watch-rollout --once --cwd D:\working\agent-subconscious
+```
+
+If no note is produced, inspect `llm_activity.jsonl`. `outcome: abstain` means
+the reviewer saw no useful alternate angle. `review_failed` records the local
+error type.
+
+If injection is missing while observations and note audit metadata exist, verify
+the daemon is live and `UserPromptSubmit` is firing. Historical `sub_notes.jsonl`
+rows do not contain reusable note bodies and are not enough for injection. In
+`always` mode, a healthy prompt-time hook should inject `Sub notes: none` even
+with no live pending note.
+
+`diagnose` intentionally reports `NOT_READY` when the latest delivery is only
+`Sub notes: none`, when it came from a synthetic diagnostic prompt, when the
+latest note is expired/stale, when the rollout watcher is not following the
+current rollout file, or when no emitted non-empty delivery proof exists.
 
 ## Design Docs
 
