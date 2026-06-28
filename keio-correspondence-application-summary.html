@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>慶應義塾大学 通信教育課程 出願準備まとめ</title>
+  <style>
+    :root {
+      --ink: #1f2933;
+      --muted: #667085;
+      --line: #d9e2ec;
+      --paper: #fbfcfe;
+      --white: #ffffff;
+      --accent: #8b1e2d;
+      --accent-soft: #f7e8eb;
+      --blue: #155e75;
+      --blue-soft: #e6f3f6;
+      --green: #226b45;
+      --green-soft: #e8f4ee;
+      --warn: #9a5b00;
+      --warn-soft: #fff3d6;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--paper);
+      font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Yu Gothic", "Yu Gothic UI", "Noto Sans JP", sans-serif;
+      line-height: 1.75;
+    }
+
+    main {
+      width: min(1040px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 32px 0 56px;
+    }
+
+    header {
+      padding: 28px 0 20px;
+      border-bottom: 1px solid var(--line);
+      margin-bottom: 24px;
+    }
+
+    h1 {
+      margin: 0 0 10px;
+      font-size: clamp(28px, 5vw, 44px);
+      line-height: 1.2;
+      letter-spacing: 0;
+    }
+
+    h2 {
+      margin: 34px 0 14px;
+      font-size: 22px;
+      line-height: 1.35;
+      letter-spacing: 0;
+    }
+
+    h3 {
+      margin: 0 0 8px;
+      font-size: 17px;
+      letter-spacing: 0;
+    }
+
+    p {
+      margin: 0 0 12px;
+    }
+
+    a {
+      color: var(--blue);
+      text-decoration-thickness: 1px;
+      text-underline-offset: 3px;
+    }
+
+    .lead {
+      max-width: 780px;
+      color: var(--muted);
+      font-size: 16px;
+    }
+
+    .notice {
+      display: grid;
+      gap: 10px;
+      padding: 18px;
+      border: 1px solid #e6b8c0;
+      background: var(--accent-soft);
+      border-radius: 8px;
+      margin: 22px 0;
+    }
+
+    .notice strong {
+      color: var(--accent);
+      font-size: 18px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .card {
+      background: var(--white);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 18px;
+    }
+
+    .timeline {
+      display: grid;
+      gap: 12px;
+    }
+
+    .timeline-item {
+      display: grid;
+      grid-template-columns: 150px 1fr;
+      gap: 16px;
+      padding: 16px;
+      background: var(--white);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+
+    .date {
+      font-weight: 700;
+      color: var(--accent);
+    }
+
+    .tag {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: var(--blue-soft);
+      color: var(--blue);
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    ul, ol {
+      margin: 8px 0 0;
+      padding-left: 1.25em;
+    }
+
+    li + li {
+      margin-top: 6px;
+    }
+
+    .question {
+      border-left: 4px solid var(--green);
+      background: var(--green-soft);
+      padding: 12px 14px;
+      border-radius: 6px;
+      margin-top: 10px;
+    }
+
+    .warning {
+      border-left: 4px solid var(--warn);
+      background: var(--warn-soft);
+      padding: 12px 14px;
+      border-radius: 6px;
+      margin-top: 12px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--white);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+      display: table;
+    }
+
+    th, td {
+      text-align: left;
+      vertical-align: top;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    th {
+      width: 28%;
+      background: #f3f6fa;
+      font-weight: 700;
+    }
+
+    tr:last-child th,
+    tr:last-child td {
+      border-bottom: 0;
+    }
+
+    footer {
+      margin-top: 36px;
+      padding-top: 18px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    @media (max-width: 720px) {
+      main {
+        width: min(100% - 24px, 1040px);
+        padding-top: 18px;
+      }
+
+      .grid,
+      .timeline-item {
+        grid-template-columns: 1fr;
+      }
+
+      table,
+      tbody,
+      tr,
+      th,
+      td {
+        display: block;
+        width: 100%;
+      }
+
+      th {
+        border-bottom: 0;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>慶應義塾大学 通信教育課程 出願準備まとめ</h1>
+      <p class="lead">2026年度10月入学を前提に、出願の締切、必要な準備、選考内容、リマインド方法を整理したものです。最終判断は必ず公式の学生募集要項で確認してください。</p>
+    </header>
+
+    <section class="notice" aria-label="最重要締切">
+      <strong>最重要締切: 2026年8月14日（金）17:00</strong>
+      <p>Web出願登録と入学検定料20,000円の支払いはこの時刻まで。郵送書類は同日消印有効です。</p>
+    </section>
+
+    <section>
+      <h2>結論</h2>
+      <div class="grid">
+        <article class="card">
+          <h3>入学選考</h3>
+          <p>募集要項上、選考方法は書類選考です。入学のための筆記試験や面接が中心になる形式ではありません。</p>
+        </article>
+        <article class="card">
+          <h3>志望理由書</h3>
+          <p>重要ですが、志望理由書だけで出願完了ではありません。Web出願、検定料支払い、証明書類の郵送なども必要です。</p>
+        </article>
+      </div>
+    </section>
+
+    <section>
+      <h2>主要日程</h2>
+      <div class="timeline">
+        <div class="timeline-item">
+          <div class="date">2026年7月1日</div>
+          <div>
+            <span class="tag">該当者のみ</span>
+            <p>障害・疾病等により出願手続上の配慮を希望する場合の相談期限。</p>
+          </div>
+        </div>
+        <div class="timeline-item">
+          <div class="date">2026年7月24日 10:00</div>
+          <div>
+            <span class="tag">受付開始</span>
+            <p>Webエントリー、入学検定料支払い、郵送書類受付が開始。</p>
+          </div>
+        </div>
+        <div class="timeline-item">
+          <div class="date">2026年8月14日 17:00</div>
+          <div>
+            <span class="tag">締切</span>
+            <p>Webエントリーと検定料支払いの締切。郵送書類は同日消印有効。</p>
+          </div>
+        </div>
+        <div class="timeline-item">
+          <div class="date">2026年9月下旬</div>
+          <div>
+            <span class="tag">発表</span>
+            <p>合格発表予定。</p>
+          </div>
+        </div>
+        <div class="timeline-item">
+          <div class="date">2026年10月1日</div>
+          <div>
+            <span class="tag">入学</span>
+            <p>2026年度10月入学日。</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>逆算スケジュール</h2>
+      <table>
+        <tbody>
+          <tr>
+            <th>今すぐから7月1日まで</th>
+            <td>学部・入学課程を仮決定。出願資格を確認。学生募集要項を読む。卒業証明書・成績証明書などを取り寄せ開始。配慮希望がある場合は7月1日までに相談。</td>
+          </tr>
+          <tr>
+            <th>7月2日から7月23日まで</th>
+            <td>志望理由書の下書きと推敲。必要書類の到着確認。証明写真データ、保証人情報、印刷環境、角形2号封筒を準備。</td>
+          </tr>
+          <tr>
+            <th>7月24日から8月6日まで</th>
+            <td>Webエントリー、検定料支払い、志望理由書の入力、郵送書類の封入前チェック。</td>
+          </tr>
+          <tr>
+            <th>8月7日から8月13日まで</th>
+            <td>締切前の最終週。Web未完了、検定料未払い、郵送未発送がないか確認。できればこの週に発送。</td>
+          </tr>
+          <tr>
+            <th>8月14日</th>
+            <td>最終締切日。17:00までにWeb出願と支払いを完了。郵送書類は同日消印を確保。</td>
+          </tr>
+          <tr>
+            <th>8月15日以降</th>
+            <td>受付メール、マイページ、控えを確認。9月下旬の合格発表と10月1日の入学準備へ。</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>志望理由書の設問</h2>
+      <ol>
+        <li>志望学部・類で何を学ぼうとしているか。過去の学習経験と将来の展望に触れて、720字以内。</li>
+        <li>学びたい学問領域に関わる書籍を1冊選び、概要をまとめ、自分の視点から論評。720字以内。著者名、タイトル、出版社名も必要。</li>
+        <li>なぜ慶應義塾大学の通信教育課程を選んだのか。150字以内。</li>
+      </ol>
+      <div class="warning">
+        <p>普通課程志願者で高校卒業後5年以内の場合は、高校の「全体の学習成績の状況」も重視されます。該当する場合は証明書類の準備を早めに。</p>
+      </div>
+    </section>
+
+    <section>
+      <h2>試験内容について</h2>
+      <p>入学選考は書類選考です。募集要項上、入学時点で筆記試験や面接を受ける形式ではありません。</p>
+      <p>一方で、入学後には単位修得のための科目試験があります。これは入学試験ではなく、通信授業でレポート提出に合格した後、単位を取るために受ける試験です。</p>
+    </section>
+
+    <section>
+      <h2>Google Calendarでリマインドする方法</h2>
+      <div class="grid">
+        <article class="card">
+          <h3>別Googleアカウントに入れたい場合</h3>
+          <p>Codex/ChatGPT側のGoogle連携をそのアカウントに切り替えるか、別アカウントのカレンダーを現在連携中のアカウントに共有して、予定変更権限を付けます。</p>
+        </article>
+        <article class="card">
+          <h3>手軽な方法</h3>
+          <p>この日程を.icsファイル化して、別GoogleアカウントのGoogle Calendarにインポートする方法が簡単です。</p>
+        </article>
+      </div>
+      <div class="question">
+        <p>カレンダーに入れるなら、最低限「7月1日」「7月24日」「8月7日」「8月14日」「9月下旬」「10月1日」は登録しておくと安心です。</p>
+      </div>
+    </section>
+
+    <footer>
+      <p>参照: <a href="https://www.tsushin.keio.ac.jp/application/">慶應義塾大学通信教育課程 出願案内</a> / <a href="https://www.tsushin.keio.ac.jp/assets/pdf/application/application/essentials20260608.pdf">2026年度10月入学 学生募集要項 PDF</a></p>
+      <p>作成日: 2026年6月27日</p>
+    </footer>
+  </main>
+</body>
+</html>
